@@ -1,13 +1,14 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
-from typing import Optional, List
-from uuid import uuid4
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
-app = FastAPI(title="Stock API", version="1.0.0")
+from database import Base, engine, get_db
+from models import Product
 
+app = FastAPI()
 
-
+# CORS (OK pour projet)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -15,66 +16,56 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Crée les tables automatiquement (mini-projet)
+Base.metadata.create_all(bind=engine)
 
-# --- Modèles ---
 class ProductCreate(BaseModel):
-    name: str = Field(min_length=1, max_length=100)
-    price: float = Field(ge=0)
-    quantity: int = Field(ge=0)
+    name: str
+    price: float
+    quantity: int
 
-class Product(ProductCreate):
-    id: str
+class ProductOut(ProductCreate):
+    id: int
 
-# --- "Base de données" en mémoire (simple pour commencer) ---
-db: List[Product] = []
+@app.get("/")
+def root():
+    return {"status": "ok"}
 
-# --- Endpoints CRUD ---
-@app.get("/products", response_model=List[Product])
-def list_products(
-    q: Optional[str] = None,          # texte dans le nom
-    min_qty: Optional[int] = None,    # quantité min
-    max_qty: Optional[int] = None     # quantité max
-):
-    results = db
+@app.get("/products", response_model=list[ProductOut])
+def list_products(db: Session = Depends(get_db)):
+    return db.query(Product).order_by(Product.id.desc()).all()
 
-    if q is not None:
-        q_lower = q.lower()
-        results = [p for p in results if q_lower in p.name.lower()]
+@app.post("/products", response_model=ProductOut)
+def create_product(payload: ProductCreate, db: Session = Depends(get_db)):
+    item = Product(
+        name=payload.name,
+        price=payload.price,
+        quantity=payload.quantity
+    )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return item
 
-    if min_qty is not None:
-        results = [p for p in results if p.quantity >= min_qty]
+@app.put("/products/{id}", response_model=ProductOut)
+def update_product(id: int, payload: ProductCreate, db: Session = Depends(get_db)):
+    item = db.query(Product).filter(Product.id == id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Product not found")
 
-    if max_qty is not None:
-        results = [p for p in results if p.quantity <= max_qty]
+    item.name = payload.name
+    item.price = payload.price
+    item.quantity = payload.quantity
+    db.commit()
+    db.refresh(item)
+    return item
 
-    return results
+@app.delete("/products/{id}")
+def delete_product(id: int, db: Session = Depends(get_db)):
+    item = db.query(Product).filter(Product.id == id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Product not found")
 
-@app.get("/products/{product_id}", response_model=Product)
-def get_product(product_id: str):
-    for p in db:
-        if p.id == product_id:
-            return p
-    raise HTTPException(status_code=404, detail="Product not found")
-
-@app.post("/products", response_model=Product, status_code=201)
-def create_product(payload: ProductCreate):
-    new_product = Product(id=str(uuid4())[:8], **payload.model_dump())
-    db.append(new_product)
-    return new_product
-
-@app.put("/products/{product_id}", response_model=Product)
-def update_product(product_id: str, payload: ProductCreate):
-    for i, p in enumerate(db):
-        if p.id == product_id:
-            updated = Product(id=product_id, **payload.model_dump())
-            db[i] = updated
-            return updated
-    raise HTTPException(status_code=404, detail="Product not found")
-
-@app.delete("/products/{product_id}", status_code=204)
-def delete_product(product_id: str):
-    for i, p in enumerate(db):
-        if p.id == product_id:
-            db.pop(i)
-            return
-    raise HTTPException(status_code=404, detail="Product not found")
+    db.delete(item)
+    db.commit()
+    return {"deleted": True}
